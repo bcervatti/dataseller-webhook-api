@@ -1,67 +1,44 @@
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 import requests
 import sqlite3
 import datetime
 import os
+import hmac
+import hashlib
 
 app = FastAPI()
 
-# Caminho absoluto do banco (garante que funcione no Render)
+# Caminho absoluto do banco (garante compatibilidade com Render)
 DB_PATH = os.path.join(os.path.dirname(__file__), "ml_tokens.db")
 
+# Assinatura secreta fornecida pelo Mercado Pago
+WEBHOOK_SECRET = "2925a271d0efcea338f9e7c21698913b4905244ea0d1ae87a0a382028ff96ce2"
+
 @app.get("/webhook")
-async def receber_code(request: Request):
-    code = request.query_params.get("code")
+async def receber_codigo(code: str = None):
     if not code:
-        return {"erro": "Código de autorização não encontrado na URL."}
+        return JSONResponse(content={"erro": "Código de autorização não encontrado na URL."}, status_code=400)
+    return JSONResponse(content={"mensagem": "Código recebido com sucesso!", "code": code})
 
-    # Dados da aplicação no Mercado Livre
-    client_id = "8940516793064447"
-    client_secret = "gd7IkR1Q8MuCm94yna6DsTS5OmO6EGnr"
-    redirect_uri = "https://dataseller-webhook.onrender.com/webhook"
+@app.post("/webhook")
+async def receber_webhook(request: Request):
+    # Valida a assinatura do Mercado Pago
+    raw_body = await request.body()
+    signature_header = request.headers.get("x-signature")
 
-    # Troca do code por token
-    response = requests.post(
-        "https://api.mercadolibre.com/oauth/token",
-        data={
-            "grant_type": "authorization_code",
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "code": code,
-            "redirect_uri": redirect_uri
-        },
-        headers={"Content-Type": "application/x-www-form-urlencoded"}
-    )
+    if not signature_header:
+        return JSONResponse(content={"erro": "Assinatura não enviada."}, status_code=403)
 
-    if response.status_code != 200:
-        return {"erro": "Erro ao obter token", "detalhe": response.text}
+    # Gera assinatura local para comparação
+    expected_signature = hmac.new(WEBHOOK_SECRET.encode(), raw_body, hashlib.sha256).hexdigest()
 
-    token_data = response.json()
-    access_token = token_data.get("access_token")
-    refresh_token = token_data.get("refresh_token")
-    created_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if signature_header != expected_signature:
+        return JSONResponse(content={"erro": "Assinatura inválida."}, status_code=403)
 
-    # Salvar no banco SQLite
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                access_token TEXT,
-                refresh_token TEXT,
-                created_at TEXT
-            )
-        """)
-        cursor.execute("INSERT INTO users (access_token, refresh_token, created_at) VALUES (?, ?, ?)",
-                       (access_token, refresh_token, created_at))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        return {"erro": "Erro ao salvar no banco de dados", "detalhe": str(e)}
+    # Se assinatura for válida, processa normalmente
+    corpo = await request.json()
+    print("📦 Webhook recebido:", corpo)
 
-    return {
-        "sucesso": True,
-        "mensagem": "Token salvo com sucesso!",
-        "access_token": access_token
-    }
+    # (Exemplo) Você pode tratar o evento aqui
+    return JSONResponse(content={"status": "ok", "evento": corpo.get("action", "desconhecido")})
